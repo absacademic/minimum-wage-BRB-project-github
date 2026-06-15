@@ -1,0 +1,495 @@
+---
+title: "Metro DID: Minimum Wage Pass-Through into FAFH CPI"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+We build  a metro-month DID panel for minimum-wage pass-through into Food Away From Home CPI. We combine the uploaded Los Angeles FAFH workbook, uploaded state and local minimum-wage files, metro FAFH CPI series for New York and Chicago from FRED, and a national overall CPI control.
+
+## 1. Packages
+
+```{r setup, message=FALSE, warning=FALSE}
+req_pkgs <- c(
+  "readxl", "readr", "dplyr", "tidyr", "stringr", "lubridate",
+  "purrr", "tibble", "ggplot2", "quantmod", "fixest", "zoo"
+)
+
+missing_pkgs <- req_pkgs[!vapply(req_pkgs, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_pkgs) > 0) install.packages(missing_pkgs)
+
+invisible(lapply(req_pkgs, library, character.only = TRUE))
+```
+
+## 2. File paths
+
+```{r paths}
+la_fafh_path  <- "SeriesReport-20260406194017_6fa512.xlsx"
+state_mw_path <- "state_minimum_wage_hikes_since_2009.csv"
+local_mw_path <- "local_minimum_wage_hikes_since_2009.csv"
+national_fafh_path <- "1978 to 2025 CPI FAFH Seasonally Adjusted.xlsx"
+```
+
+## 3. Helper functions
+
+```{r helpers}
+read_bls_xlsx_monthly <- function(path) {
+  raw <- readxl::read_excel(path, sheet = 1, skip = 11)
+
+  month_order <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+  raw %>%
+    dplyr::select(Year, dplyr::all_of(month_order)) %>%
+    dplyr::filter(!is.na(Year)) %>%
+    tidyr::pivot_longer(
+      cols = dplyr::all_of(month_order),
+      names_to = "month_abb",
+      values_to = "value"
+    ) %>%
+    dplyr::mutate(
+      year = as.integer(Year),
+      month = match(month_abb, month_order),
+      date = as.Date(sprintf("%04d-%02d-01", year, month)),
+      value = suppressWarnings(as.numeric(value))
+    ) %>%
+    dplyr::arrange(date) %>%
+    dplyr::select(date, value)
+}
+
+get_fred_series <- function(series_id, value_name = "value") {
+  xt <- quantmod::getSymbols(Symbols = series_id, src = "FRED", auto.assign = FALSE)
+  tibble::tibble(
+    date = as.Date(zoo::index(xt)),
+    value = as.numeric(xt[, 1])
+  ) %>%
+    dplyr::mutate(date = as.Date(format(date, "%Y-%m-01"))) %>%
+    dplyr::rename(!!value_name := value)
+}
+
+parse_rate_num <- function(x) {
+  x <- as.character(x)
+  nums <- stringr::str_extract_all(x, "[0-9]+\\.?[0-9]*")
+  purrr::map_dbl(nums, function(v) {
+    if (length(v) == 0) return(NA_real_)
+    max(as.numeric(v), na.rm = TRUE)
+  })
+}
+
+month_floor_after_cutoff <- function(date_vec, cutoff_day = 24L) {
+  d <- as.Date(date_vec)
+  shifted <- lubridate::floor_date(d, unit = "month")
+  idx <- !is.na(d) & lubridate::day(d) >= cutoff_day
+  shifted[idx] <- lubridate::ceiling_date(d[idx], unit = "month")
+  as.Date(shifted)
+}
+
+build_monthly_rate_series <- function(changes_df, entity_col, eff_col, from_col, to_col,
+                                      start_date, end_date) {
+  entity_sym <- rlang::sym(entity_col)
+  eff_sym    <- rlang::sym(eff_col)
+  from_sym   <- rlang::sym(from_col)
+  to_sym     <- rlang::sym(to_col)
+
+  months <- tibble::tibble(date = seq(as.Date(start_date), as.Date(end_date), by = "month"))
+  entities <- changes_df %>% dplyr::distinct(!!entity_sym) %>% dplyr::pull(!!entity_sym)
+
+  purrr::map_dfr(entities, function(entity_value) {
+    df <- changes_df %>%
+      dplyr::filter(!!entity_sym == entity_value) %>%
+      dplyr::arrange(!!eff_sym)
+
+    baseline <- df %>% dplyr::slice(1) %>% dplyr::pull(!!from_sym)
+    baseline <- ifelse(length(baseline) == 0 || is.na(baseline[1]), NA_real_, baseline[1])
+
+    months %>%
+      dplyr::left_join(
+        df %>% dplyr::select(date = !!eff_sym, rate = !!to_sym),
+        by = "date"
+      ) %>%
+      dplyr::arrange(date) %>%
+      tidyr::fill(rate, .direction = "down") %>%
+      dplyr::mutate(
+        rate = ifelse(is.na(rate), baseline, rate),
+        !!entity_col := entity_value,
+        .before = date
+      )
+  })
+}
+
+lag_within  <- function(x, k = 1L) dplyr::lag(x, n = k)
+lead_within <- function(x, k = 1L) dplyr::lead(x, n = k)
+```
+
+## 4. Metro outcome series
+
+Read Los Angeles from CPI FAFH,
+Pull New York and Chicago from FRED.
+
+```{r outcomes}
+la_outcome <- read_bls_xlsx_monthly(la_fafh_path) %>%
+  dplyr::mutate(metro = "Los Angeles") %>%
+  dplyr::rename(fafh = value)
+
+ny_outcome <- get_fred_series("CUURA101SEFV", "fafh") %>%
+  dplyr::mutate(metro = "New York")
+
+chi_outcome <- get_fred_series("CUURA207SEFV", "fafh") %>%
+  dplyr::mutate(metro = "Chicago")
+
+outcome_panel <- dplyr::bind_rows(la_outcome, ny_outcome, chi_outcome) %>%
+  dplyr::filter(date >= as.Date("2009-01-01"), !is.na(fafh))
+```
+
+## 5. Overall CPI control
+
+Pull the common inflation control series
+
+```{r cpi-control}
+cpi_all_us <- get_fred_series("CPIAUCNS", "cpi_all_us") %>%
+  dplyr::filter(date >= as.Date("2009-01-01"))
+```
+
+## 6. Minimum-wage input tables
+
+Read the state and local wage-change files and convert them into clean monthly change tables
+
+```{r mw-inputs}
+state_mw_raw <- readr::read_csv(state_mw_path, show_col_types = FALSE)
+local_mw_raw <- readr::read_csv(local_mw_path, show_col_types = FALSE)
+
+state_changes <- state_mw_raw %>%
+  dplyr::transmute(
+    state = jurisdiction,
+    effective_month = as.Date(effective_date_assumption),
+    from_rate = as.numeric(from_rate),
+    to_rate   = as.numeric(to_rate)
+  ) %>%
+  dplyr::filter(!is.na(effective_month), !is.na(from_rate), !is.na(to_rate)) %>%
+  dplyr::arrange(state, effective_month)
+
+local_changes <- local_mw_raw %>%
+  dplyr::transmute(
+    jurisdiction = jurisdiction,
+    effective_date = as.Date(effective_date),
+    effective_month = month_floor_after_cutoff(effective_date, cutoff_day = 24L),
+    from_rate = parse_rate_num(before_rate_raw),
+    to_rate   = parse_rate_num(to_rate_raw)
+  ) %>%
+  dplyr::filter(!is.na(effective_month), !is.na(to_rate)) %>%
+  dplyr::group_by(jurisdiction, effective_month) %>%
+  dplyr::summarise(
+    from_rate = max(from_rate, na.rm = TRUE),
+    to_rate   = max(to_rate, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    from_rate = ifelse(is.infinite(from_rate), NA_real_, from_rate),
+    to_rate   = ifelse(is.infinite(to_rate), NA_real_, to_rate)
+  ) %>%
+  dplyr::arrange(jurisdiction, effective_month)
+
+federal_changes <- tibble::tribble(
+  ~entity,     ~effective_month, ~from_rate, ~to_rate,
+  "Federal",  as.Date("2009-01-01"), 6.55, 6.55,
+  "Federal",  as.Date("2009-08-01"), 6.55, 7.25
+)
+
+sample_start <- as.Date("2009-01-01")
+sample_end   <- max(outcome_panel$date, na.rm = TRUE)
+
+federal_monthly <- build_monthly_rate_series(
+  changes_df = federal_changes,
+  entity_col = "entity",
+  eff_col    = "effective_month",
+  from_col   = "from_rate",
+  to_col     = "to_rate",
+  start_date = sample_start,
+  end_date   = sample_end
+) %>%
+  dplyr::filter(entity == "Federal") %>%
+  dplyr::select(date, federal_rate = rate)
+
+state_monthly <- build_monthly_rate_series(
+  changes_df = state_changes,
+  entity_col = "state",
+  eff_col    = "effective_month",
+  from_col   = "from_rate",
+  to_col     = "to_rate",
+  start_date = sample_start,
+  end_date   = sample_end
+)
+
+local_monthly <- build_monthly_rate_series(
+  changes_df = local_changes,
+  entity_col = "jurisdiction",
+  eff_col    = "effective_month",
+  from_col   = "from_rate",
+  to_col     = "to_rate",
+  start_date = sample_start,
+  end_date   = sample_end
+)
+```
+
+## 7. Metro mapping
+
+Map each metro to the state and local jurisdictions used to build treatment
+
+```{r metro-mapping}
+metro_core_state <- tibble::tribble(
+  ~metro,         ~core_state,
+  "Los Angeles", "California",
+  "New York",    "New York",
+  "Chicago",     "Illinois"
+)
+
+metro_state_components <- tibble::tribble(
+  ~metro,         ~state,
+  "Los Angeles", "California",
+  "New York",    "New York",
+  "New York",    "New Jersey",
+  "New York",    "Pennsylvania",
+  "Chicago",     "Illinois",
+  "Chicago",     "Indiana",
+  "Chicago",     "Wisconsin"
+)
+
+metro_local_components <- tibble::tribble(
+  ~metro,         ~jurisdiction,
+  "Los Angeles", "Los Angeles County",
+  "Los Angeles", "Los Angeles, CA",
+  "Los Angeles", "Santa Monica, CA",
+  "Los Angeles", "Malibu, CA",
+  "Chicago",     "Cook County, IL"
+)
+```
+
+## 8. Metro-month treatment measures
+
+Build the baseline binding wage and the multistate sensitivity measure
+
+```{r treatment-panel}
+metro_core_state_monthly <- metro_core_state %>%
+  dplyr::left_join(state_monthly, by = c("core_state" = "state")) %>%
+  dplyr::rename(core_state_rate = rate)
+
+metro_local_monthly <- metro_local_components %>%
+  dplyr::left_join(local_monthly, by = "jurisdiction") %>%
+  dplyr::group_by(metro, date) %>%
+  dplyr::summarise(local_rate_max = max(rate, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(local_rate_max = ifelse(is.infinite(local_rate_max), NA_real_, local_rate_max))
+
+metro_multistate_monthly <- metro_state_components %>%
+  dplyr::left_join(state_monthly, by = "state") %>%
+  dplyr::group_by(metro, date) %>%
+  dplyr::summarise(multistate_avg_rate = mean(rate, na.rm = TRUE), .groups = "drop")
+
+metro_mw_panel <- outcome_panel %>%
+  dplyr::distinct(metro, date) %>%
+  dplyr::left_join(federal_monthly, by = "date") %>%
+  dplyr::left_join(
+    metro_core_state_monthly %>% dplyr::select(metro, date, core_state_rate),
+    by = c("metro", "date")
+  ) %>%
+  dplyr::left_join(metro_local_monthly, by = c("metro", "date")) %>%
+  dplyr::left_join(metro_multistate_monthly, by = c("metro", "date")) %>%
+  dplyr::mutate(
+    core_state_rate     = pmax(core_state_rate, federal_rate, na.rm = TRUE),
+    mw_core_local       = pmax(core_state_rate, local_rate_max, na.rm = TRUE),
+    mw_core_local       = ifelse(is.infinite(mw_core_local), core_state_rate, mw_core_local),
+    multistate_avg_rate = pmax(multistate_avg_rate, federal_rate, na.rm = TRUE)
+  )
+```
+
+## 9. Regression panel
+
+Join outcomes, treatment, and controls, then construct log changes and treatment indicators
+
+```{r panel-build}
+panel <- outcome_panel %>%
+  dplyr::left_join(cpi_all_us, by = "date") %>%
+  dplyr::left_join(metro_mw_panel, by = c("metro", "date")) %>%
+  dplyr::arrange(metro, date) %>%
+  dplyr::group_by(metro) %>%
+  dplyr::mutate(
+    log_fafh            = log(fafh),
+    log_cpi_all_us      = log(cpi_all_us),
+    log_mw_core_local   = log(mw_core_local),
+    log_mw_multistate   = log(multistate_avg_rate),
+    dlog_fafh           = log_fafh - lag_within(log_fafh),
+    dlog_cpi_all_us     = log_cpi_all_us - lag_within(log_cpi_all_us),
+    dlog_mw_core_local  = log_mw_core_local - lag_within(log_mw_core_local),
+    dlog_mw_multistate  = log_mw_multistate - lag_within(log_mw_multistate),
+    lead_dlog_mw_core   = lead_within(dlog_mw_core_local),
+    lag_dlog_mw_core    = lag_within(dlog_mw_core_local),
+    treated_core        = as.integer(!is.na(dlog_mw_core_local) & dlog_mw_core_local > 0),
+    month               = factor(lubridate::month(date)),
+    year                = factor(lubridate::year(date))
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(date >= as.Date("2009-02-01"))
+
+readr::write_csv(panel, "metro_panel_cleaned.csv")
+readr::write_csv(
+  panel %>%
+    dplyr::filter(treated_core == 1) %>%
+    dplyr::select(metro, date, mw_core_local, core_state_rate, local_rate_max),
+  "treated_months_by_metro.csv"
+)
+
+est <- panel %>%
+  dplyr::filter(
+    !is.na(dlog_fafh),
+    !is.na(dlog_cpi_all_us),
+    !is.na(dlog_mw_core_local),
+    !is.na(dlog_mw_multistate)
+  )
+```
+
+## 10. Main models
+
+Estimate the baseline DID, a treated-month version, a dynamic version, and two robustness checks
+
+```{r models}
+m1 <- fixest::feols(
+  dlog_fafh ~ dlog_mw_core_local + dlog_cpi_all_us | metro + month + year,
+  data = est,
+  cluster = ~ metro
+)
+
+m2 <- fixest::feols(
+  dlog_fafh ~ treated_core + dlog_cpi_all_us | metro + month + year,
+  data = est,
+  cluster = ~ metro
+)
+
+m3 <- fixest::feols(
+  dlog_fafh ~ lead_dlog_mw_core + dlog_mw_core_local + lag_dlog_mw_core + dlog_cpi_all_us |
+    metro + month + year,
+  data = est %>% dplyr::filter(!is.na(lead_dlog_mw_core), !is.na(lag_dlog_mw_core)),
+  cluster = ~ metro
+)
+
+m4 <- fixest::feols(
+  dlog_fafh ~ dlog_mw_multistate + dlog_cpi_all_us | metro + month + year,
+  data = est,
+  cluster = ~ metro
+)
+
+est <- est %>% dplyr::mutate(year_month = interaction(format(date, "%Y-%m"), drop = TRUE))
+
+m5 <- fixest::feols(
+  dlog_fafh ~ dlog_mw_core_local | metro + year_month,
+  data = est,
+  cluster = ~ metro
+)
+```
+
+## 11. Results snapshot
+
+Print the model summaries and implied elasticities
+
+```{r results}
+summary(m1)
+summary(m2)
+summary(m3)
+summary(m4)
+summary(m5)
+
+beta1 <- coef(m1)["dlog_mw_core_local"]
+beta4 <- coef(m4)["dlog_mw_multistate"]
+
+cat(sprintf("Model 1 elasticity: %.4f -> 10%% MW increase implies %.3f%% FAFH increase\n", beta1, 10 * beta1))
+cat(sprintf("Model 4 elasticity: %.4f -> 10%% MW increase implies %.3f%% FAFH increase\n", beta4, 10 * beta4))
+
+if ("dlog_mw_core_local" %in% names(coef(m3))) {
+  bsum <- sum(coef(m3)[c("lead_dlog_mw_core", "dlog_mw_core_local", "lag_dlog_mw_core")], na.rm = TRUE)
+  cat(sprintf("Model 3 cumulative lead/current/lag elasticity: %.4f -> 10%% MW increase implies %.3f%% FAFH increase\n", bsum, 10 * bsum))
+}
+```
+
+## 12. Export tables and plot
+
+Write outputs into txt and create event study plot png (var p)
+
+```{r exports}
+broom_fixest <- function(model, model_name) {
+  ct <- as.data.frame(fixest::coeftable(model))
+  ct$term <- rownames(ct)
+  rownames(ct) <- NULL
+  names(ct)[1:4] <- c("estimate", "std_error", "t_value", "p_value")
+  tibble::as_tibble(ct) %>%
+    dplyr::mutate(model = model_name) %>%
+    dplyr::select(model, term, estimate, std_error, t_value, p_value)
+}
+
+coef_table <- dplyr::bind_rows(
+  broom_fixest(m1, "m1_core_local"),
+  broom_fixest(m2, "m2_treated_dummy"),
+  broom_fixest(m3, "m3_dynamic"),
+  broom_fixest(m4, "m4_multistate_avg"),
+  broom_fixest(m5, "m5_yearmonth_fe")
+)
+readr::write_csv(coef_table, "model_coefficients.csv")
+
+model_text <- capture.output({
+  cat("\n==============================\n")
+  cat("MODEL 1: Main intensity DID (core state + mapped local ordinances)\n")
+  print(summary(m1))
+
+  cat("\n==============================\n")
+  cat("MODEL 2: Binary treated-month DID\n")
+  print(summary(m2))
+
+  cat("\n==============================\n")
+  cat("MODEL 3: Dynamic lead/current/lag DID\n")
+  print(summary(m3))
+
+  cat("\n==============================\n")
+  cat("MODEL 4: Sensitivity using equal-weight multistate treatment\n")
+  print(summary(m4))
+
+  cat("\n==============================\n")
+  cat("MODEL 5: Robustness with metro FE + year-month FE\n")
+  print(summary(m5))
+
+  cat("\n==============================\n")
+  cat("IMPLIED PASS-THROUGH FOR A 10% MINIMUM-WAGE INCREASE\n")
+  cat(sprintf("Model 1 elasticity: %.4f -> 10%% MW increase implies %.3f%% FAFH increase\n", beta1, 10 * beta1))
+  cat(sprintf("Model 4 elasticity: %.4f -> 10%% MW increase implies %.3f%% FAFH increase\n", beta4, 10 * beta4))
+
+  if ("dlog_mw_core_local" %in% names(coef(m3))) {
+    bsum <- sum(coef(m3)[c("lead_dlog_mw_core", "dlog_mw_core_local", "lag_dlog_mw_core")], na.rm = TRUE)
+    cat(sprintf("Model 3 cumulative lead/current/lag elasticity: %.4f -> 10%% MW increase implies %.3f%% FAFH increase\n", bsum, 10 * bsum))
+  }
+})
+
+writeLines(model_text, con = "did_model_summary.txt")
+
+plot_df <- est %>%
+  dplyr::select(date, metro, dlog_fafh, dlog_mw_core_local, treated_core) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(
+    mean_dlog_fafh = mean(dlog_fafh, na.rm = TRUE),
+    treated_share = mean(treated_core, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = date, y = mean_dlog_fafh)) +
+  ggplot2::geom_line() +
+  ggplot2::geom_point(data = subset(plot_df, treated_share > 0), size = 2) +
+  ggplot2::labs(
+    title = "Average metro FAFH inflation with treated months marked",
+    subtitle = "Dots indicate months where at least one metro experiences a minimum-wage increase",
+    x = NULL,
+    y = "Average monthly log change in FAFH CPI"
+  ) +
+  ggplot2::theme_minimal()
+
+ggsave("event_study_plot.png", plot = p, width = 10, height = 5, dpi = 300)
+```
+
+## Final note
+
+The notebook writes the cleaned panel, treated-month file, model summaries, coefficient table, and the plot into the working directory.

@@ -1,0 +1,138 @@
+METRO DiD SUMMARY
+========================================
+
+1) DATA
+---------------------------
+The cleaned metro panel contains 612 monthly observations from 2009-02 through 2026-02.
+The sample covers 3 metro areas: Chicago, Los Angeles, New York.
+Each metro contributes Chicago: 204, Los Angeles: 204, New York: 204 observations.
+
+This is a very small panel in the cross-sectional sense because there are only three metros.
+That means the regressions can still be estimated, but inference should be treated cautiously because clustering is done at the metro level and there are only three clusters.
+
+2) HOW MUCH TREATMENT
+------------------------------
+The core treated-month indicator equals 1 in 28 metro-months, which is 4.58% of the full sample.
+Treated months by metro:
+Chicago: 6 treated months (2017-07, 2018-07, 2019-07, 2020-07, 2024-01, 2025-01)
+Los Angeles: 9 treated months (2016-07, 2017-07, 2018-07, 2019-07, 2020-07, 2023-01, 2024-01, 2025-01, 2026-01)
+New York: 13 treated months (2009-08, 2014-01, 2015-01, 2016-01, 2017-01, 2018-01, 2019-01, 2021-01, 2022-01, 2023-01, 2024-01, 2025-01, 2026-01)
+
+Across treated months, the average minimum-wage increase is about 7.44%,
+the median is about 7.38%,
+the smallest is about 1.40%,
+and the largest is about 21.21%.
+
+Most months in the data are untreated.
+The identifying variation comes from a fairly small number of wage-hike months, and the typical hike is moderate, 
+though a few are much larger.
+
+3) MODEL 1: MAIN INTENSITY DID
+------------------------------
+Dependent variable: monthly log change in FAFH CPI
+Treatment regressor: dlog_mw_core_local
+
+Estimate on dlog_mw_core_local: 0.001662
+Clustered standard error: 0.008749
+t-value: 0.189932
+p-value: 0.866893
+
+Implied pass-through:
+A 10% minimum-wage increase implies an estimated 1.662% change in FAFH prices.
+
+The point estimate is positive, so the fitted direction goes the way standard pass-through stories would suggest.
+But it is extremely small and statistically weak in this sample.
+Thus, this model does not provide strong evidence that restaurant prices rose meaningfully in response to the 
+wage hikes in this three-metro panel.
+
+4) MODEL 2: BINARY TREATED-MONTH DID
+------------------------------------
+Dependent variable: monthly log change in FAFH CPI
+Treatment regressor: treated_core
+
+Estimate on treated_core: 0.000157
+Clustered standard error: 0.000442
+t-value: 0.356117
+p-value: 0.755810
+
+This version asks: do FAFH prices move differently in months with a wage hike versus months without one?
+The estimate is positive but extremely close to zero, and it is not statistically strong.
+So this specification also does not show a clear treated-versus-untreated price jump.
+
+5) MODEL 3: DYNAMIC LEAD/CURRENT/LAG DID
+----------------------------------------
+Lead coefficient: -0.011992  (SE 0.008282, p = 0.284603)
+Current coefficient: 0.000424  (SE 0.008336, p = 0.964039)
+Lag coefficient: -0.013339  (SE 0.004989, p = 0.116057)
+
+Cumulative lead + current + lag elasticity: -0.024907
+Implied pass-through for a 10% minimum-wage increase: -24.907%
+
+The lead coefficient is negative, which could suggest prices were already moving before the policy month, but it is not statistically strong here.
+The contemporaneous coefficient is basically zero.
+The lag coefficient is also negative and larger in magnitude, though still not conventionally significant in this setup.
+Taken together, the dynamic pattern does not look like clean positive pass-through, suggesting instead 
+either noisy timing, sparse treatment variation, or measurement/specification limitations in this sample.
+
+6) MODEL 4: SENSITIVITY WITH EQUAL-WEIGHT MULTISTATE TREATMENT
+--------------------------------------------------------------
+Estimate on dlog_mw_multistate: 0.002011
+Clustered standard error: 0.007564
+t-value: 0.265850
+p-value: 0.815251
+
+Implied pass-through:
+A 10% minimum-wage increase implies an estimated 2.011% change in FAFH prices.
+
+This alternative treatment construction gives a result very similar to Model 1.
+That is useful because it means the headline result is not being driven only by one way of mapping metro exposure.
+But it is still tiny and statistically weak.
+
+7) MODEL 5: ROBUSTNESS WITH METRO FE + YEAR-MONTH FE
+----------------------------------------------------
+Estimate on dlog_mw_core_local: 0.004825
+Clustered standard error: 0.009000
+t-value: 0.536141
+p-value: 0.645511
+
+Implied pass-through:
+A 10% minimum-wage increase implies an estimated 4.825% change in FAFH prices.
+
+This is the toughest specification because year-month fixed effects absorb any shocks common to all metros in the same 
+month.
+The estimate stays positive, and it becomes somewhat larger than in Model 1, but it is still not statistically strong.
+So even after tightening the fixed effects, the evidence for pass-through remains weak.
+
+8) WHAT THE FIT STATISTICS MEAN
+-------------------------------
+Across models, the adjusted R-squared values are modest and the within R-squared values are very small.
+That means the fixed effects explain some background variation, but the treatment variables themselves explain 
+very little of the month-to-month within-metro movement in FAFH inflation.
+
+The models are mostly picking up stable metro differences and calendar patterns, which is indeed not a 
+strong wage-hike signal.
+
+9) INTERPRETATION
+-----------------------------
+In this three-metro treated-versus-untreated DID panel, the estimated pass-through from minimum-wage hikes into FAFH CPI is small and imprecise.
+
+More specifically:
+- Model 1 suggests about a 1.662% FAFH price increase for a 10% wage increase.
+- Model 4 suggests about a 2.011% FAFH price increase for a 10% wage increase.
+- Model 5 suggests about a 4.825% FAFH price increase for a 10% wage increase.
+- The dynamic model gives a cumulative estimate of -24.907%, which is negative.
+
+The sample does not reproduce the larger positive pass-through magnitudes prev. reported in prior literature.
+We see very small effects and substantial uncertainty
+
+10) LIMITATIONS
+-------------------------
+1. Only three metros are in the panel, so clustered standard errors should be interpreted very cautiously.
+2. Only 28 treated metro-months appear in the core treatment variable, so identification is sparse.
+3. The coefficients are not conventionally statistically significant in the exported coefficient table.
+4. A negative dynamic cumulative estimate does not necessarily mean wage hikes actually lowered prices; 
+it can also reflect timing issues, noise, limited sample size, or treatment-mapping problems.
+
+The safest summary is that this metro DID exercise finds weak and statistically inconclusive evidence of 
+price pass-through in FAFH CPI over this sample, with point estimates that are much smaller than the 
+literature would suggest.
